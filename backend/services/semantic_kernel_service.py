@@ -75,14 +75,47 @@ async def get_rag_answer(
 
     if not result:
         return "I don't know."
+    # Extract only the assistant's text; avoid returning raw Ollama metadata (model=..., created_at=..., etc.)
+    text = _extract_answer_text(result)
+    return text if text else "I don't know."
+
+
+def _extract_answer_text(result) -> str | None:
+    """Get plain answer text from Semantic Kernel / Ollama result. Never return model metadata."""
+    if result is None:
+        return None
+    # 1. get_inner_content() often returns the ChatMessageContent with .content
     try:
-        inner = result.get_inner_content() if hasattr(result, "get_inner_content") else result.value
-        if inner is not None and hasattr(inner, "content"):
-            return inner.content or "I don't know."
-        if inner is not None:
-            return str(inner)
+        if hasattr(result, "get_inner_content"):
+            inner = result.get_inner_content()
+            if inner is not None:
+                if hasattr(inner, "content") and inner.content:
+                    return str(inner.content).strip()
+                if hasattr(inner, "message") and inner.message is not None:
+                    m = inner.message
+                    if hasattr(m, "content") and m.content:
+                        return str(m.content).strip()
     except Exception:
         pass
-    if hasattr(result, "value") and result.value:
-        return str(result.value)
-    return "I don't know."
+    # 2. result.value might be ChatMessageContent or list of contents
+    try:
+        val = getattr(result, "value", None)
+        if val is not None:
+            if hasattr(val, "content") and val.content:
+                return str(val.content).strip()
+            if hasattr(val, "message") and val.message is not None and getattr(val.message, "content", None):
+                return str(val.message.content).strip()
+            if isinstance(val, (list, tuple)) and len(val) > 0:
+                first = val[0]
+                if hasattr(first, "content") and first.content:
+                    return str(first.content).strip()
+            # Last resort: if str(val) looks like repr with content='...', parse it
+            s = str(val)
+            if "content=" in s and "model=" in s:
+                import re
+                match = re.search(r"content=['\"]([^'\"]*)['\"]", s)
+                if match:
+                    return match.group(1).strip()
+    except Exception:
+        pass
+    return None

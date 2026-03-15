@@ -106,6 +106,44 @@ class VectorService:
             out.append((chunk_index, score, text))
         return out
 
+    def get_document_chunks(self, doc_id: str) -> list[tuple[int, str]]:
+        """Return all stored chunks for a document as (chunk_index, text)."""
+        name = self._collection_name(doc_id)
+        try:
+            collection = self._client.get_collection(name=name)
+        except Exception:
+            return []
+        n = collection.count()
+        if n == 0:
+            return []
+        # get() by metadata filter or by known ids
+        try:
+            data = collection.get(
+                where={"doc_id": doc_id},
+                include=["documents", "metadatas"],
+                limit=n,
+            )
+        except Exception:
+            data = None
+        if not data or not data["ids"]:
+            # Fallback: fetch by ids (we use doc_id_0, doc_id_1, ...)
+            try:
+                ids = [f"{doc_id}_{i}" for i in range(n)]
+                data = collection.get(ids=ids, include=["documents", "metadatas"])
+            except Exception:
+                return []
+        if not data or not data["ids"]:
+            return []
+        docs = data["documents"]
+        metas = data["metadatas"]
+        out = []
+        for i, meta in enumerate(metas):
+            idx = int(meta.get("chunk_index", i))
+            text = docs[i] if i < len(docs) else ""
+            out.append((idx, text))
+        out.sort(key=lambda x: x[0])
+        return out
+
     def document_exists(self, doc_id: str) -> bool:
         name = self._collection_name(doc_id)
         try:
