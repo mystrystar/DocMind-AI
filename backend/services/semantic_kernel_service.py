@@ -1,12 +1,19 @@
 """
-RAG chat service: answer from context using either OpenAI (GPT-4o) or Ollama (free, local).
-Set OLLAMA_BASE_URL=http://localhost:11434 to use Ollama instead of OpenAI (no API key needed).
+RAG chat service: answer from context using Ollama via Semantic Kernel (OllamaChatCompletion).
+Uses llama3.2 or mistral (configurable). Ollama at http://localhost:11434. No OpenAI or API keys.
 """
 
 import os
 from typing import List
 
-# RAG prompt template
+from semantic_kernel import Kernel
+from semantic_kernel.functions import KernelArguments
+
+# Ollama chat model (must be pulled: ollama pull llama3.2 / ollama pull mistral)
+OLLAMA_CHAT_MODEL = os.getenv("OLLAMA_CHAT_MODEL", "llama3.2")
+OLLAMA_BASE_URL = os.getenv("OLLAMA_HOST", "http://localhost:11434").rstrip("/")
+
+# RAG prompt template: {{$context}} and {{$question}} filled via KernelArguments
 RAG_PROMPT_TEMPLATE = """You are a helpful document Q&A assistant. You must follow these rules strictly:
 
 1. Answer ONLY using the provided context below. Do not use external knowledge.
@@ -16,14 +23,10 @@ RAG_PROMPT_TEMPLATE = """You are a helpful document Q&A assistant. You must foll
 
 Context from the document:
 ---
-{{context}}
+{{$context}}
 ---
 
-User question: {{question}}"""
-
-
-def _use_ollama() -> bool:
-    return bool(os.getenv("OLLAMA_BASE_URL", "").strip())
+User question: {{$question}}"""
 
 
 def _build_context(context_chunks: List[str]) -> str:
@@ -32,71 +35,44 @@ def _build_context(context_chunks: List[str]) -> str:
     )
 
 
+def create_kernel() -> Kernel:
+    """Create Semantic Kernel with OllamaChatCompletion (no API key)."""
+    try:
+        from semantic_kernel.connectors.ai.ollama import OllamaChatCompletion
+    except ImportError:
+        raise ImportError(
+            "Ollama connector not installed. Run: pip install 'semantic-kernel[ollama]'"
+        )
+    kernel = Kernel()
+    # host = Ollama server URL (e.g. http://localhost:11434)
+    service = OllamaChatCompletion(
+        ai_model_id=OLLAMA_CHAT_MODEL,
+        host=OLLAMA_BASE_URL,
+    )
+    kernel.add_service(service)
+    return kernel
+
+
 async def get_rag_answer(
     context_chunks: List[str],
     question: str,
-    kernel=None,
+    kernel: Kernel | None = None,
 ) -> str:
     """
-    Run RAG: combine chunks into context, then call either Ollama (free) or OpenAI via Semantic Kernel.
+    Run RAG: combine chunks into context, call Ollama via Semantic Kernel, return answer.
     """
     if not context_chunks:
         return "I don't know. No relevant passages were found in the document for your question."
 
     context = _build_context(context_chunks)
-    prompt = RAG_PROMPT_TEMPLATE.replace("{{context}}", context).replace("{{question}}", question)
-
-    if _use_ollama():
-        return await _get_rag_answer_ollama(prompt)
-    return await _get_rag_answer_openai(prompt, kernel)
-
-
-async def _get_rag_answer_ollama(prompt: str) -> str:
-    """Call local Ollama (free). Requires Ollama running with a model e.g. llama3.1."""
-    from openai import OpenAI
-    base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434").rstrip("/") + "/v1"
-    model = os.getenv("OLLAMA_MODEL", "llama3.1")
-    client = OpenAI(base_url=base_url, api_key="ollama")
-    try:
-        resp = client.chat.completions.create(
-            model=model,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.1,
-            max_tokens=1024,
-        )
-        if resp.choices and resp.choices[0].message.content:
-            return resp.choices[0].message.content.strip()
-    except Exception as e:
-        return f"I couldn't get an answer from the local model. Is Ollama running? (Error: {e})"
-    return "I don't know."
-
-
-async def _get_rag_answer_openai(prompt: str, kernel=None) -> str:
-    """Call OpenAI via Semantic Kernel. Uses prompt built by caller (full string)."""
-    from semantic_kernel import Kernel
-    from semantic_kernel.connectors.ai.open_ai import OpenAIChatCompletion
-    from semantic_kernel.functions import KernelArguments
-
-    CHAT_MODEL = os.getenv("OPENAI_CHAT_MODEL_ID", "gpt-4o")
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        return "OpenAI API key is not set. Set OPENAI_API_KEY in .env or use Ollama (OLLAMA_BASE_URL=http://localhost:11434) for free chat."
-
     if kernel is None:
-        kernel = Kernel()
-        kernel.add_service(OpenAIChatCompletion(ai_model_id=CHAT_MODEL, api_key=api_key))
+        kernel = create_kernel()
+    arguments = KernelArguments(context=context, question=question)
+    try:
+        result = await kernel.invoke_prompt(RAG_PROMPT_TEMPLATE, arguments=arguments)
+    except Exception as e:
+        return f"I couldn't get an answer from Ollama. Is it running? (Error: {e})"
 
-    # Single user message with full RAG prompt (context + question already in prompt)
-    SK_TEMPLATE = """You are a helpful document Q&A assistant. You must follow these rules strictly:
-
-1. Answer ONLY using the provided context below. Do not use external knowledge.
-2. If the context does not contain enough information to answer the question, respond with exactly: "I don't know" or "The provided context does not contain enough information to answer that."
-3. Do not make up or assume facts. Cite which part of the context supports your answer when possible.
-4. Keep answers concise and grounded in the context.
-
-{{$prompt}}"""
-    arguments = KernelArguments(prompt=prompt)
-    result = await kernel.invoke_prompt(SK_TEMPLATE, arguments=arguments)
     if not result:
         return "I don't know."
     try:
@@ -110,20 +86,3 @@ async def _get_rag_answer_openai(prompt: str, kernel=None) -> str:
     if hasattr(result, "value") and result.value:
         return str(result.value)
     return "I don't know."
-
-
-def create_kernel():
-    """Create Semantic Kernel (only used when not using Ollama)."""
-    if _use_ollama():
-        return None
-    from semantic_kernel import Kernel
-    from semantic_kernel.connectors.ai.open_ai import OpenAIChatCompletion
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        return None
-    kernel = Kernel()
-    kernel.add_service(OpenAIChatCompletion(
-        ai_model_id=os.getenv("OPENAI_CHAT_MODEL_ID", "gpt-4o"),
-        api_key=api_key,
-    ))
-    return kernel

@@ -1,66 +1,46 @@
 """
 ChromaDB vector service: store document chunks and run semantic search.
-Supports two modes:
-- Local (free): ChromaDB's DefaultEmbeddingFunction (all-MiniLM-L6-v2, runs on your machine).
-- OpenAI: uses OpenAI embeddings (requires API key and quota).
-Set USE_LOCAL_EMBEDDINGS=true in .env for free tier (no OpenAI needed for embeddings).
+Uses Ollama for embeddings only (model: nomic-embed-text) at http://localhost:11434.
+No OpenAI or API keys required.
 """
 
 import os
-from typing import Optional
 
 import chromadb
 from chromadb.config import Settings
 
-# Persist ChromaDB under ./chroma_data relative to backend
+# Ollama runs locally
+OLLAMA_EMBEDDING_MODEL = os.getenv("OLLAMA_EMBEDDING_MODEL", "nomic-embed-text")
+OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434")
 CHROMA_PERSIST_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "chroma_data")
 
-# Set to "true" or "1" to use local embeddings (free, no OpenAI)
-USE_LOCAL_EMBEDDINGS = os.getenv("USE_LOCAL_EMBEDDINGS", "").strip().lower() in ("true", "1", "yes")
+
+def _get_ollama_embedding(text: str) -> list[float]:
+    """Single text embedding via Ollama nomic-embed-text."""
+    import ollama
+    # ollama client uses OLLAMA_HOST env by default
+    r = ollama.embed(model=OLLAMA_EMBEDDING_MODEL, input=text)
+    if not r or not r.embeddings:
+        raise RuntimeError("Ollama embed returned no embeddings")
+    return r.embeddings[0]
 
 
-def _get_local_embedding_function():
-    """Local embeddings: all-MiniLM-L6-v2, runs on your machine. No API key."""
-    try:
-        from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
-        return DefaultEmbeddingFunction()
-    except ImportError:
-        from chromadb.utils.embedding_functions import SentenceTransformerEmbeddingFunction
-        return SentenceTransformerEmbeddingFunction(model_name="all-MiniLM-L6-v2")
-
-
-# --- OpenAI path (when not using local embeddings) ---
-if not USE_LOCAL_EMBEDDINGS:
-    from openai import OpenAI
-    EMBEDDING_MODEL = os.getenv("OPENAI_EMBEDDING_MODEL_ID", "text-embedding-3-small")
-
-    def _get_openai_client() -> OpenAI:
-        api_key = os.getenv("OPENAI_API_KEY")
-        if not api_key:
-            raise ValueError("OPENAI_API_KEY is required when not using local embeddings. Set USE_LOCAL_EMBEDDINGS=true for free tier.")
-        return OpenAI(api_key=api_key)
-
-    def _get_embedding(text: str, client: Optional[OpenAI] = None) -> list[float]:
-        client = client or _get_openai_client()
-        resp = client.embeddings.create(model=EMBEDDING_MODEL, input=text)
-        return resp.data[0].embedding
-
-    def _get_embeddings_batch(texts: list[str], client: Optional[OpenAI] = None) -> list[list[float]]:
-        client = client or _get_openai_client()
-        batch_size = 100
-        all_embeddings = []
-        for i in range(0, len(texts), batch_size):
-            batch = texts[i : i + batch_size]
-            resp = client.embeddings.create(model=EMBEDDING_MODEL, input=batch)
-            sorted_data = sorted(resp.data, key=lambda x: x.index)
-            all_embeddings.extend([d.embedding for d in sorted_data])
-        return all_embeddings
+def _get_ollama_embeddings_batch(texts: list[str]) -> list[list[float]]:
+    """Batch embeddings via Ollama. Ollama accepts list input."""
+    if not texts:
+        return []
+    import ollama
+    # ollama.embed(model=..., input=[...]) returns one embedding per item in order
+    r = ollama.embed(model=OLLAMA_EMBEDDING_MODEL, input=texts)
+    if not r or not r.embeddings:
+        raise RuntimeError("Ollama embed returned no embeddings")
+    return r.embeddings
 
 
 class VectorService:
     """
     ChromaDB-backed vector store: one collection per document (doc_id).
-    Uses local embeddings (free) when USE_LOCAL_EMBEDDINGS=true, else OpenAI.
+    All embeddings from Ollama (nomic-embed-text).
     """
 
     def __init__(self):
@@ -68,19 +48,6 @@ class VectorService:
             path=CHROMA_PERSIST_DIR,
             settings=Settings(anonymized_telemetry=False),
         )
-        self._use_local = USE_LOCAL_EMBEDDINGS
-        self._openai = None
-        self._local_ef = None
-
-    def _openai_client(self):
-        if not USE_LOCAL_EMBEDDINGS and self._openai is None:
-            self._openai = _get_openai_client()
-        return self._openai
-
-    def _local_embedding_fn(self):
-        if self._local_ef is None:
-            self._local_ef = _get_local_embedding_function()
-        return self._local_ef
 
     def _collection_name(self, doc_id: str) -> str:
         safe = "".join(c if c.isalnum() or c == "-" else "_" for c in doc_id)
@@ -94,31 +61,19 @@ class VectorService:
             self._client.delete_collection(name)
         except Exception:
             pass
-
-        if self._use_local:
-            # Free tier: Chroma embeds with DefaultEmbeddingFunction (all-MiniLM-L6-v2)
-            collection = self._client.create_collection(
-                name=name,
-                metadata={"doc_id": doc_id},
-                embedding_function=self._local_embedding_fn(),
-            )
-            ids = [f"{doc_id}_{i}" for i in range(len(chunks))]
-            metadatas = [{"doc_id": doc_id, "chunk_index": i} for i in range(len(chunks))]
-            collection.add(ids=ids, documents=chunks, metadatas=metadatas)
-        else:
-            collection = self._client.create_collection(
-                name=name,
-                metadata={"doc_id": doc_id},
-            )
-            ids = [f"{doc_id}_{i}" for i in range(len(chunks))]
-            metadatas = [{"doc_id": doc_id, "chunk_index": i} for i in range(len(chunks))]
-            embeddings = _get_embeddings_batch(chunks, self._openai_client())
-            collection.add(
-                ids=ids,
-                documents=chunks,
-                embeddings=embeddings,
-                metadatas=metadatas,
-            )
+        collection = self._client.create_collection(
+            name=name,
+            metadata={"doc_id": doc_id},
+        )
+        ids = [f"{doc_id}_{i}" for i in range(len(chunks))]
+        metadatas = [{"doc_id": doc_id, "chunk_index": i} for i in range(len(chunks))]
+        embeddings = _get_ollama_embeddings_batch(chunks)
+        collection.add(
+            ids=ids,
+            documents=chunks,
+            embeddings=embeddings,
+            metadatas=metadatas,
+        )
 
     def search(
         self,
@@ -131,21 +86,12 @@ class VectorService:
             collection = self._client.get_collection(name=name)
         except Exception:
             return []
-
-        if self._use_local:
-            results = collection.query(
-                query_texts=[query],
-                n_results=min(top_k, collection.count()),
-                include=["documents", "metadatas", "distances"],
-            )
-        else:
-            query_embedding = _get_embedding(query, self._openai_client())
-            results = collection.query(
-                query_embeddings=[query_embedding],
-                n_results=min(top_k, collection.count()),
-                include=["documents", "metadatas", "distances"],
-            )
-
+        query_embedding = _get_ollama_embedding(query)
+        results = collection.query(
+            query_embeddings=[query_embedding],
+            n_results=min(top_k, collection.count()),
+            include=["documents", "metadatas", "distances"],
+        )
         if not results or not results["ids"] or not results["ids"][0]:
             return []
         out = []
