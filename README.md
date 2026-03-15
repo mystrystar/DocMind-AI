@@ -49,7 +49,8 @@ py -m venv .venv
 pip install -r requirements.txt
 copy .env.example .env
 # Edit .env and set OPENAI_API_KEY=sk-...
-uvicorn main:app --reload --host 0.0.0.0 --port 8000
+# Important: keep the venv activated (you should see (.venv) in the prompt), then run:
+python -m uvicorn main:app --reload --host 0.0.0.0 --port 8000
 ```
 
 **macOS/Linux:**
