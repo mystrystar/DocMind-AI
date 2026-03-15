@@ -25,16 +25,23 @@ def _get_ollama_embedding(text: str) -> list[float]:
     return r.embeddings[0]
 
 
+# Small batch size for Ollama embed to avoid timeouts/OOM on large docs (e.g. 14 MB PDFs)
+OLLAMA_EMBED_BATCH_SIZE = int(os.getenv("OLLAMA_EMBED_BATCH_SIZE", "25"))
+
+
 def _get_ollama_embeddings_batch(texts: list[str]) -> list[list[float]]:
-    """Batch embeddings via Ollama. Ollama accepts list input."""
+    """Batch embeddings via Ollama in small chunks so large documents (e.g. 14 MB) can be processed."""
     if not texts:
         return []
     import ollama
-    # ollama.embed(model=..., input=[...]) returns one embedding per item in order
-    r = ollama.embed(model=OLLAMA_EMBEDDING_MODEL, input=texts)
-    if not r or not r.embeddings:
-        raise RuntimeError("Ollama embed returned no embeddings")
-    return r.embeddings
+    all_embeddings = []
+    for i in range(0, len(texts), OLLAMA_EMBED_BATCH_SIZE):
+        batch = texts[i : i + OLLAMA_EMBED_BATCH_SIZE]
+        r = ollama.embed(model=OLLAMA_EMBEDDING_MODEL, input=batch)
+        if not r or not r.embeddings:
+            raise RuntimeError("Ollama embed returned no embeddings")
+        all_embeddings.extend(r.embeddings)
+    return all_embeddings
 
 
 class VectorService:
@@ -65,15 +72,20 @@ class VectorService:
             name=name,
             metadata={"doc_id": doc_id},
         )
+        # Embed in batches (handles large docs e.g. 14 MB PDFs) then add to Chroma in chunks
+        all_embeddings = _get_ollama_embeddings_batch(chunks)
         ids = [f"{doc_id}_{i}" for i in range(len(chunks))]
         metadatas = [{"doc_id": doc_id, "chunk_index": i} for i in range(len(chunks))]
-        embeddings = _get_ollama_embeddings_batch(chunks)
-        collection.add(
-            ids=ids,
-            documents=chunks,
-            embeddings=embeddings,
-            metadatas=metadatas,
-        )
+        # Add to Chroma in batches of 100 to avoid huge single request
+        add_batch_size = 100
+        for j in range(0, len(chunks), add_batch_size):
+            end = min(j + add_batch_size, len(chunks))
+            collection.add(
+                ids=ids[j:end],
+                documents=chunks[j:end],
+                embeddings=all_embeddings[j:end],
+                metadatas=metadatas[j:end],
+            )
 
     def search(
         self,
