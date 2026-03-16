@@ -1,0 +1,21 @@
+# Backend
+backend/.env
+backend/chroma_data/
+backend/data/
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
