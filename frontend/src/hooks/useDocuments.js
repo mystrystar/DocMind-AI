@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { getDocuments, uploadDocument } from '../api/client';
+import { getDocuments, uploadDocument, deleteDocument } from '../api/client';
 
 export function useDocuments() {
   const [documents, setDocuments] = useState([]);
@@ -47,6 +47,11 @@ export function useDocuments() {
     }
   }, [fetchDocuments]);
 
+  const deleteDoc = useCallback(async (docId) => {
+    await deleteDocument(docId);
+    setDocuments((docs) => docs.filter((d) => d.doc_id !== docId));
+  }, []);
+
   const clearUploadState = useCallback(() => {
     setUploadProgress(0);
     setUploadStatus(null);
@@ -61,5 +66,6 @@ export function useDocuments() {
     uploadProgress,
     uploadStatus,
     clearUploadState,
+    deleteDoc,
   };
 }
