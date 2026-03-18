@@ -56,7 +56,12 @@ def _start_backend_if_needed() -> None:
     try:
         import uvicorn
     except Exception as e:  # pragma: no cover
-        st.error(f"uvicorn not available; cannot start backend automatically: {e}")
+        st.error(
+            "uvicorn not available, so the backend cannot be started automatically.\n\n"
+            "Fix: install dependencies from the repo root, then restart Streamlit:\n"
+            "  pip install -r requirements.txt\n\n"
+            "Or set START_BACKEND=false and run the backend separately on port 8000."
+        )
         return
 
     def _run() -> None:

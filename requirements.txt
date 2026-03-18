@@ -1,0 +1,11 @@
+# Root requirements for Streamlit.
+#
+# This project’s backend dependencies live in `backend/requirements.txt`.
+# Streamlit Cloud (and many local setups) typically install from the repo-root
+# `requirements.txt`, so we include the backend requirements here too.
+
+streamlit>=1.0.0
+requests>=2.0.0
+
+-r backend/requirements.txt
+
